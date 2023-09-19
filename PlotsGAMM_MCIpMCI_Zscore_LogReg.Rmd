@@ -24,6 +24,7 @@ library(gammit)
 library(ggforce )
 library(ROCR)
 library(cowplot)
+library(gt)
 #"mgcv","mgcViz","gratia","ggsci","gamair","gammit","tidyr")
 ```
 
@@ -36,15 +37,12 @@ EndColname="HarmZ_scoreLeft.TTG.transverse.temporal.gyrus"
 ## functions
 ```{r, echo=TRUE, warning=FALSE, message=FALSE}
 CalcYearsToOnset<-function(df){
-#df_Zscore %>% group_by(ID)%>%test()
   OnsetDate=df[df$VISCODE==unique(df$onset),]$MRIAchievements_1_5T_EXAMDATE
   if(length(OnsetDate)==0){
     OnsetDate=df[df$VISCODE=="SC",]$MRIAchievements_1_5T_EXAMDATE+
      365/12*as.numeric(str_replace(unique(df$onset),"M",""))
   }
-  
   YearsToOnset=as.numeric(difftime(df$MRIAchievements_1_5T_EXAMDATE,OnsetDate,units = "days"))/365.25
-  
   return(data.frame(ID_VISCODE=df$ID_VISCODE,YearsToOnset=YearsToOnset))
 }
 
@@ -79,11 +77,11 @@ colnames(df_convert)=c("ID","onset")
 
 ## Read Zscore
 df_Zscore=readZscore("Fix_HarmZ_JADNI_AD.xlsx")
-df_spMCI=readZscore("./ML/GNB_noPCA_spMCI_Fix_HarmZ_JADNI_AD.xlsx")
-#df_spMCI=readZscore("./ML/LogReg_noPCA_spMCI_Fix_HarmZ_JADNI_AD.xlsx")
-#LogitTransform
-df_spMCI=df_spMCI%>%mutate(Prob=log(Prob/(1-Prob)))
-df_spMCI[which(df_spMCI$Prob == Inf, TRUE),"Prob"] <- max(df_spMCI$Prob[is.finite(df_spMCI$Prob)])
+List_spMCI=list()
+List_spMCI[["GNB"]]=readZscore("./ML/GNB_noPCA_spMCI_Fix_HarmZ_JADNI_AD.xlsx")
+List_spMCI[["LogistReg"]]=readZscore("./ML/LogReg_noPCA_spMCI_Fix_HarmZ_JADNI_AD.xlsx")
+List_spMCI[["SVC"]]=readZscore("./ML/SVC_noPCA_spMCI_Fix_HarmZ_JADNI_AD.xlsx")
+
 ## Get ROInames
 dataStCol=which(colnames(df_Zscore)==StColname)
 dataEndCol=which(colnames(df_Zscore)==EndColname)
@@ -91,29 +89,51 @@ ROInames=colnames(df_Zscore)[dataStCol:dataEndCol]
 ROInames=append(ROInames,c("MMSCORE"))
 
 ```
+#LogitTransform
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+for(Classifer in names(List_spMCI)){
+  List_spMCI[[Classifer]]=List_spMCI[[Classifer]]%>%
+                              mutate(LogitProb=log(Prob/(1-Prob)))
+  #Replace Inf and -Inf to Max and Min Value
+  List_spMCI[[Classifer]][which(List_spMCI[[Classifer]]$LogitProb == Inf, TRUE),"LogitProb"] <-
+                max(List_spMCI[[Classifer]]$LogitProb[is.finite(List_spMCI[[Classifer]]$LogitProb)])
+  List_spMCI[[Classifer]][which(List_spMCI[[Classifer]]$LogitProb == -Inf, TRUE),"LogitProb"]<-
+    min(List_spMCI[[Classifer]]$LogitProb[is.finite(List_spMCI[[Classifer]]$LogitProb)])
+  
+  #Add invProb and invLotigProb colmuns
+  List_spMCI[[Classifer]]=List_spMCI[[Classifer]]%>%
+                    mutate(invProb=-1*Prob)
+  
+  List_spMCI[[Classifer]]=List_spMCI[[Classifer]]%>%
+                    mutate(invLogitProb=-1*LogitProb)
+  
+  
+}
+```
 
-## preproc pMCI infomation
+
+## Add onset column at only pMCI subjects
 ```{r, echo=TRUE, warning=FALSE, message=FALSE}
 
 #Add onset column at only pMCI subjects
-df_pMCI=df_spMCI%>%
-  filter(subDiagnostic=="pMCI")%>%
-  left_join(df_convert,by="ID")%>%
-  mutate(invProb=-1*Prob)
-#df_Onset=df_Zscore %>%filter(subDiagnostic=="pMCI")%>%group_by(ID)%>%CalcYearsToOnset()
-df_Onset= data.frame(  )
-for(uID in unique(df_pMCI$ID)){
-  if(nrow(filter(df_pMCI,ID==uID))!=0){
-    df_Onset=rbind(df_Onset,CalcYearsToOnset(filter(df_pMCI,ID==uID)))
+List_pMCI=list()
+for(Classifer in names(List_spMCI)){
+  List_pMCI[[Classifer]]=List_spMCI[[Classifer]]%>%
+      filter(subDiagnostic=="pMCI")%>%
+      left_join(df_convert,by="ID")
+  
+  df_Onset= data.frame(  )
+  for(uID in unique(List_pMCI[[Classifer]]$ID)){
+    if(nrow(filter(List_pMCI[[Classifer]],ID==uID))!=0){
+      df_Onset=rbind(df_Onset,CalcYearsToOnset(filter(List_pMCI[[Classifer]],ID==uID)))
+    }
   }
+  
+  List_pMCI[[Classifer]]=List_pMCI[[Classifer]]%>%left_join(df_Onset,by="ID_VISCODE")%>%
+    tidyr::drop_na(YearsToOnset)
+  List_pMCI[[Classifer]]$PTGENDER=factor(List_pMCI[[Classifer]]$PTGENDER)
 }
-df_pMCI=df_pMCI%>%left_join(df_Onset,by="ID_VISCODE")%>%
-  tidyr::drop_na(YearsToOnset)
-df_pMCI$PTGENDER=factor(df_pMCI$PTGENDER)
 
-write.xlsx(df_pMCI,"pMCI_Fix_HarmZ_JADNI.xlsx")
-#Check 
-#df_pMCI%>%select(ID,YearsToOnset)
 
 ```
 ## Plot pMCI
@@ -174,81 +194,94 @@ gamm.model=readRDS("gamm_pMCI.obj")
 
 ## Plot EachROI
 ROInames=names(gamm.model)
-ROInames=c("HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus")
-for(roi in ROInames){
-  model=gamm.model[[roi]]
-  g=plot_pMCI(df_pMCI,roi,c(-25,5),gamm.model)
-  plot(g)
+ROInames=c("invProb","invLogitProb")
+for(Classifer in names(List_spMCI)){
+  for(roi in ROInames){
+    model=gamm.model[[roi]]
+    g=plot_pMCI(List_pMCI[[Classifer]],roi,c(-10,10),gamm.model)
+    plot(g)
+  }
 }
+#roi="Prob"
+#plot(plot_pMCI(df_pMCI,roi,c(-1,10),gamm.model))
 
-roi="Prob"
-plot(plot_pMCI(df_pMCI,roi,c(-1,10),gamm.model))
-
-roi="MMSCORE"
-plot(plot_pMCI(df_pMCI,roi,c(0,30),gamm.model))
+#roi="MMSCORE"
+#plot(plot_pMCI(df_pMCI,roi,c(0,30),gamm.model))
 
 ```
 
 #Plot time variability of onset 
 ```{r, echo=TRUE, warning=FALSE, message=FALSE}
-ROInames=c("HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus","Prob","MMSCORE")
-
-for(roi in ROInames){
-    print(roi)
-    ##summary of pMCI before Onset
-    df_pMCI_summary=df_pMCI%>%
-          filter(YearsToOnset> -0.9)%>%
-          filter(YearsToOnset< -0.3)%>%
-         #filter(YearsToOnset==0)%>%  
-      group_by(ID)%>%
-          summarise(MaxValue=max(.data[[roi]]),MeanValue=mean(.data[[roi]]),
-                    MinValue=min(.data[[roi]]))
-   df_pMCI_summary["subDiagnostic"]="pMCI_justbeforConvert"
-   ##summary of sMCI 
-   df_sMCI_summary=df_spMCI%>%group_by(ID)%>%
-          summarise(MaxValue=max(.data[[roi]]),MeanValue=mean(.data[[roi]]),
-                    MinValue=min(.data[[roi]]))
-   df_sMCI_summary["subDiagnostic"]="sMCI_Mean"
-   df_spMCI_summary=rbind(df_sMCI_summary,df_pMCI_summary)
-  
-   ##Violin plot meansMCI and pMCI before Convert
-   g=ggplot(data=df_spMCI_summary,aes(x=subDiagnostic ,y=MeanValue,color=subDiagnostic))
-   g=g+geom_violin()+geom_sina()
-   g=g+ggtitle(roi)
-   g=g+theme(legend.position = "none")+ylab("")
-   plot(g) 
-   
-   #ROC
-   inv=-1
-  if(roi=="Prob")inv=1
+#ROInames=c("HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus","Prob","LogitProb","MMSCORE")
+ROInames=c("Prob","HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus","MMSCORE")
+df_auc_cross=data.frame()
+for(Classifer in names(List_spMCI)){
+  for(roi in ROInames){
+      print(paste0(Classifer," ",roi))
+      ##summary of pMCI before Onset
+      df_pMCI_summary=List_pMCI[[Classifer]]%>%
+            filter(YearsToOnset> -0.9)%>%
+            filter(YearsToOnset< -0.3)%>%
+           #filter(YearsToOnset==0)%>%  
+        group_by(ID)%>%
+            summarise(MaxValue=max(.data[[roi]]),MeanValue=mean(.data[[roi]]),
+                      MinValue=min(.data[[roi]]))
+     df_pMCI_summary["subDiagnostic"]="pMCI_justbeforConvert"
+     ##summary of sMCI 
+     df_sMCI_summary=List_spMCI[[Classifer]]%>%group_by(ID)%>%
+            summarise(MaxValue=max(.data[[roi]]),MeanValue=mean(.data[[roi]]),
+                      MinValue=min(.data[[roi]]))
+     df_sMCI_summary["subDiagnostic"]="sMCI_Mean"
+     df_spMCI_summary=rbind(df_sMCI_summary,df_pMCI_summary)
+    
+     ##Violin plot meansMCI and pMCI before Convert
+     g=ggplot(data=df_spMCI_summary,aes(x=subDiagnostic ,y=MeanValue,color=subDiagnostic))
+     g=g+geom_violin()+geom_sina()
+     if(roi=="Prob"){g=g+ggtitle(paste0(Classifer,"_",roi))}
+     else{g=g+ggtitle(paste0(roi))}
+     g=g+theme(legend.position = "none")+ylab("")
+     plot(g) 
      
-  pred <- prediction(inv*df_spMCI_summary$MeanValue, df_spMCI_summary$subDiagnostic=="pMCI_justbeforConvert")
-  perf <- performance(pred, "tpr", "fpr")
-  auc=performance(pred,"auc")
-  print(as.numeric(auc@y.values))
-  plot(perf)  
+     #ROC
+     inv=-1
+    if(roi=="Prob"|roi=="MMSCORE")inv=1
+       
+    pred <- prediction(inv*df_spMCI_summary$MeanValue, df_spMCI_summary$subDiagnostic=="pMCI_justbeforConvert")
+    perf <- performance(pred, "tpr", "fpr")
+    auc=performance(pred,"auc")
+    df_auc_cross=rbind(df_auc_cross,data.frame(Method=Classifer,ROI=roi,AUC=as.numeric(auc@y.values)))
+    #print(as.numeric(auc@y.values))
+    plot(perf)  
+  }
 }
+df_auc_cross%>%filter(ROI!="Prob")%>%
+         distinct(ROI,.keep_all = TRUE)%>%
+         mutate(Method="NA")%>%
+         rbind(df_auc_cross%>%filter(ROI=="Prob"))%>%
+         gt()
+      
 
 ```
 #Plot time variability of VISCODE
 ```{r, echo=TRUE, warning=FALSE, message=FALSE}
-ROInames=c("HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus","Prob","MMSCORE")
-
+ROInames=c("HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus","Prob","LogitProb","MMSCORE")
+List_spMCILong=list()
+for(Classifer in names(List_spMCI)){
 for(roi in ROInames){
     print(roi)
-    df_pMCI_beforeConvert=df_pMCI%>%
+    df_pMCI_beforeConvert_tmp=List_pMCI[[Classifer]]%>%
                             filter(YearsToOnset< 0)%>%
-                            select(-c("YearsToOnset","onset","invProb"))
-   df_pMCI_beforeConvert["subDiagnostic"]="pMCI_beforConvert"
+                            select(-c("YearsToOnset","onset"))%>%
+                            mutate(subDiagnostic="pMCI_beforConvert")
    
-   df_spMCI_beforeConvert=df_spMCI%>%filter(subDiagnostic=="sMCI")%>%
-              rbind(df_pMCI_beforeConvert)
+   List_spMCILong[[Classifer]]=List_spMCI[[Classifer]]%>%filter(subDiagnostic=="sMCI")%>%
+              rbind(df_pMCI_beforeConvert_tmp)
    
    
-   g=ggplot(data=df_spMCI_beforeConvert,aes_string(x="MRIAchievements_1_5T_EXAMDATE" ,y=roi,color="subDiagnostic"))
+   g=ggplot(data=df_pMCI_beforeConvert_tmp,aes_string(x="MRIAchievements_1_5T_EXAMDATE" ,y=roi,color="subDiagnostic"))
    g=g+geom_point(size=0.8)
    g=g+stat_smooth(aes(group=ID),method = 'lm', se = F,size=0.4,alpha=0.3)
-   
+   g=g+ggtitle(Classifer)
    
    ##Violin plot meansMCI and pMCI before Convert
    #g=ggplot(data=df_spMCI_beforeConvert,aes_string(x="VISCODE" ,y=roi,color="subDiagnostic"))
@@ -257,59 +290,71 @@ for(roi in ROInames){
    #g=g+theme(legend.position = "none")
    plot(g) 
    
-
+}
 }
 
 ```
 
 #Plot liner coef.
 ```{r, echo=TRUE, warning=FALSE, message=FALSE}
-ROInames=c("HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus","Prob","MMSCORE")
-for(roi in ROInames){
-  df_LinearCoeff=data.frame()
-  for(uID in unique(df_spMCI_beforeConvert$ID)){
-    eq=as.formula(paste0(roi,"~MRIAchievements_1_5T_EXAMDATE"))
-    fit=lm(formula = eq,data=df_spMCI_beforeConvert%>%filter(ID==!!uID))
-    if(!is.na(fit$coefficients[2])){
-      df_LinearCoeff=rbind(df_LinearCoeff,data.frame(ID=uID,intercept=fit$coefficients[1],slope=fit$coefficients[2]))
+ROInames=c("HarmZ_scoreLeft.Hippocampus","HarmZ_scoreRight.Hippocampus","Prob")
+df_auc_long=data.frame()
+for(Classifer in names(List_spMCILong)){
+  for(roi in ROInames){
+    paste0("## ",roi)%>%cat()
+    df_LinearCoeff=data.frame()
+    for(uID in unique(List_spMCILong[[Classifer]]$ID)){
+      eq=as.formula(paste0(roi,"~MRIAchievements_1_5T_EXAMDATE"))
+      fit=lm(formula = eq,data=List_spMCILong[[Classifer]]%>%filter(ID==!!uID))
+      if(!is.na(fit$coefficients[2])){
+        df_LinearCoeff=rbind(df_LinearCoeff,data.frame(ID=uID,intercept=fit$coefficients[1],slope=fit$coefficients[2]))
+      }
     }
-  }
-
-  df_LinearCoeff=left_join(df_LinearCoeff,
-                              df_spMCI_beforeConvert%>%group_by(ID)%>%
-                              summarise(count=n(),subDiagnostic=subDiagnostic),by="ID")
-
-  g_s=ggplot(df_LinearCoeff,aes(subDiagnostic,slope,color=subDiagnostic))
-  g_s=g_s+geom_sina()
-  g_s=g_s+ggtitle(roi)
-  g_s=g_s+theme(legend.position = "none")
-  #plot(g)
-
-  g_i=ggplot(df_LinearCoeff,aes(subDiagnostic,intercept,color=subDiagnostic))
-  g_i=g_i+geom_sina()
-  g_i=g_i+ggtitle(roi)
-  g_i=g_i+theme(legend.position = "none")
-  #plot(g)
   
-  plot(plot_grid(g_s,g_i, ncol = 2, rel_widths = c(.5, .5)))
+    df_LinearCoeff=left_join(df_LinearCoeff,
+                                List_spMCILong[[Classifer]]%>%group_by(ID)%>%
+                                summarise(count=n(),subDiagnostic=subDiagnostic),by="ID")
+  
+    g_s=ggplot(df_LinearCoeff,aes(subDiagnostic,slope,color=subDiagnostic))
+    g_s=g_s+geom_sina()
+    g_s=g_s+ggtitle(paste0(Classifer,"_",roi))
+    g_s=g_s+theme(legend.position = "none")
+    #plot(g)
+  
+    g_i=ggplot(df_LinearCoeff,aes(subDiagnostic,intercept,color=subDiagnostic))
+    g_i=g_i+geom_sina()
+    g_i=g_i+ggtitle(paste0(Classifer,"_",roi))
+    g_i=g_i+theme(legend.position = "none")
+    #plot(g)
     
-  inv=-1
-  if(roi=="Prob")inv=1
+    plot(plot_grid(g_s,g_i, ncol = 2, rel_widths = c(.5, .5)))
+      
+    inv=-1
+    if(roi=="Prob")inv=1
+    
+    pred <- prediction(inv*df_LinearCoeff$slope, df_LinearCoeff$subDiagnostic=="pMCI_beforConvert")
+    perf <- performance(pred, "tpr", "fpr")
+    auc=performance(pred,"auc")
+    df_auc_long=rbind(df_auc_long,data.frame(Method=paste0(Classifer,"_Slope"),ROI=roi,AUC=as.numeric(auc@y.values)))
+#    print(as.numeric(auc@y.values))
+    #plot(perf)  
+    
+    
   
-  pred <- prediction(inv*df_LinearCoeff$slope, df_LinearCoeff$subDiagnostic=="pMCI_beforConvert")
-  perf <- performance(pred, "tpr", "fpr")
-  auc=performance(pred,"auc")
-  print(as.numeric(auc@y.values))
-  plot(perf)  
-  
-  
-
-  
-  pred <- prediction(df_LinearCoeff$intercept, df_LinearCoeff$subDiagnostic=="pMCI_beforConvert")
-  perf <- performance(pred, "tpr", "fpr")
-  auc=performance(pred,"auc")
-  print(as.numeric(auc@y.values))
-  plot(perf)
-}  
+    
+    pred <- prediction(df_LinearCoeff$intercept, df_LinearCoeff$subDiagnostic=="pMCI_beforConvert")
+    perf <- performance(pred, "tpr", "fpr")
+    auc=performance(pred,"auc")
+    #print(as.numeric(auc@y.values))
+    df_auc_long=rbind(df_auc_long,data.frame(Method=paste0(Classifer,"_Intercept"),ROI=roi,AUC=as.numeric(auc@y.values)))
+    #plot(perf)
+  }
+}
+df_auc_long%>%filter(ROI!="Prob")%>%
+         distinct(AUC,.keep_all = TRUE)%>%
+         #mutate(Method=str_replace(Method,glob2rx("*_"),""))%>%
+          mutate(Method=str_replace(Method,"GNB_",""))%>%
+          rbind(df_auc_long%>%filter(ROI=="Prob"))%>%
+         gt()
 
 ```
