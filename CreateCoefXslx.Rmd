@@ -1,0 +1,189 @@
+---
+title: "CreateCoefXslx"
+author: "Maikusa"
+date: "2023-09-15"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(openxlsx)
+library(ggplot2)
+library(gridExtra)
+library(lemon)
+library(stringr)
+library(lubridate)
+library(umap)
+library(mgcv)
+library(gammit)
+library(ggforce )
+library(ROCR)
+library(cowplot)
+library(gt)
+#"mgcv","mgcViz","gratia","ggsci","gamair","gammit","tidyr")
+```
+
+## Initialize
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+rm(list=ls())
+StColname="HarmZ_score3rd.Ventricle"
+EndColname="HarmZ_scoreLeft.TTG.transverse.temporal.gyrus" 
+```
+## functions
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+CalcYearsToOnset<-function(df){
+  OnsetDate=df[df$VISCODE==unique(df$onset),]$MRIAchievements_1_5T_EXAMDATE
+  if(length(OnsetDate)==0){
+    OnsetDate=df[df$VISCODE=="SC",]$MRIAchievements_1_5T_EXAMDATE+
+     365/12*as.numeric(str_replace(unique(df$onset),"M",""))
+  }
+  YearsToOnset=as.numeric(difftime(df$MRIAchievements_1_5T_EXAMDATE,OnsetDate,units = "days"))/365.25
+  return(data.frame(ID_VISCODE=df$ID_VISCODE,YearsToOnset=YearsToOnset))
+}
+
+readZscore<-function(xlsxname){
+  df_tmp=read.xlsx(xlsxname)
+  df_tmp$MRIAchievements_1_5T_EXAMDATE=as.Date(df_tmp$MRIAchievements_1_5T_EXAMDATE,origin="1899-12-30")
+  df_Zscore=df_tmp %>% 
+    select(contains("HarmZ-score"))%>%
+    select(-c("HarmZ-scoreRight.Ventral.DC",
+              "HarmZ-scoreLeft.Ventral.DC",
+              "HarmZ-scoreCerebellar.Vermal.Lobules.I-V",
+              "HarmZ-scoreCerebellar.Vermal.Lobules.VI-VII",
+              "HarmZ-scoreCerebellar.Vermal.Lobules.VIII-X")) 
+  colnames(df_Zscore)=str_replace(colnames(df_Zscore),"HarmZ-score","HarmZ_score")
+  df_Zscore=cbind(df_tmp[,1:which(colnames(df_tmp)=="MRIAchievements_1_5T_EXAMDATE")],
+                  select(df_tmp,c("Age","subDiagnostic",contains("Prob"))),df_Zscore)
+  df_Zscore$Diagnostic=as.factor(df_Zscore$Diagnostic)
+  df_Zscore$VISCODE=factor(df_Zscore$VISCODE,levels = c("SC","6M","12M","18M","24M","36M" ))
+  return(df_Zscore)
+}
+
+```
+
+## Read data
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+## Read Converter infomation.
+df_convert=read.table(file="./CONVERSIONS_J-ADNI.tsv", sep="\t",header=T)%>%
+              filter(TYPE=="MCI to AD")%>%
+              select(c("ID","VISCODE"))%>%
+              rename(onset=VISCODE)
+## Read Zscore
+df_Zscore=readZscore("Fix_HarmZ_JADNI_AD.xlsx")%>%
+              left_join(df_convert,by="ID")    
+
+## Get ROInames
+dataStCol=which(colnames(df_Zscore)==StColname)
+dataEndCol=which(colnames(df_Zscore)==EndColname)
+ROInames=colnames(df_Zscore)[dataStCol:dataEndCol]
+
+```
+
+
+
+## Add onset and yearsToOnset column at only pMCI subjects
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Add onset column at only pMCI subjects
+df_pMCI_YearsToOnsetTmp=df_Zscore%>%
+                    filter(subDiagnostic=="pMCI")%>%
+                    dplyr::group_split(ID) %>%
+                    purrr::map_dfr(CalcYearsToOnset)
+df_Zscore=left_join(df_Zscore%>%
+                      mutate(ID_VISCODE=paste0(ID,"_",VISCODE)),
+                    df_pMCI_YearsToOnsetTmp,by="ID_VISCODE")
+```
+
+#Calc liner coef.
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+Create_df_LinearCoeff<-function(df_Zscore,ROInames){
+ 
+   CalcLnearCoef<-function(df){
+     df=drop_na(df)
+     if(nrow(df) >1){  
+      eq=as.formula(paste0("ROI~MRIAchievements_1_5T_EXAMDATE"))
+      fit=lm(formula = eq,data=df)
+        df=df%>%
+          mutate(intercept=fit$coefficients[1],slope=fit$coefficients[2])%>%
+          distinct(ID,.keep_all = TRUE)
+     }
+     else{
+        df=df%>%
+          mutate(intercept=NA,slope=NA)%>%
+          distinct(ID,.keep_all = TRUE)
+     }
+      return(df)
+  }
+  
+  df_LinearCoeff=df_Zscore%>%
+                  arrange(MRIAchievements_1_5T_EXAMDATE)%>%
+                  select(ID,PTGENDER,Age,eTIV,Diagnostic,subDiagnostic)%>%
+                  distinct(ID,.keep_all = TRUE)%>%
+                  arrange(ID)
+  for(roi in ROInames){
+        tmp_df_LinearCoeff=df_Zscore%>%
+            rename(ROI:=roi)%>%
+            select(ID,ROI,MRIAchievements_1_5T_EXAMDATE)%>% #or rename(ROI:=roi)%>%
+            dplyr::group_split(ID) %>%
+            purrr::map_dfr(CalcLnearCoef)%>%
+            rename(!!paste0("slope_",roi):=slope)%>%
+            rename(!!paste0("intercept_",roi):=intercept)%>%
+            select(-ROI,-MRIAchievements_1_5T_EXAMDATE)
+     
+        df_LinearCoeff=df_LinearCoeff%>%
+                          left_join(tmp_df_LinearCoeff,by="ID")
+                          
+  }
+  return(df_LinearCoeff)
+}
+AllVisit_n=df_Zscore%>%
+              group_by(ID)%>%
+              summarise(VisitNum=n())
+
+df_LinearCoeff_Allvisit=left_join(AllVisit_n,Create_df_LinearCoeff(df_Zscore,ROInames),by="ID")
+write.xlsx(df_LinearCoeff_Allvisit,"LinearCoef_AllVist_Fix_HarmZ_JADNI_AD.xlsx")
+
+df_Zscore_BeforeConvert=rbind(df_Zscore%>%filter(subDiagnostic!="pMCI"),
+                             df_Zscore%>%filter(subDiagnostic=="pMCI")%>%
+                                         filter(YearsToOnset<= -0.3))
+BeforeConvertVisit_n=df_Zscore_BeforeConvert%>%
+              group_by(ID)%>%
+              summarise(VisitNum=n())
+
+df_Zscore_BeforeConvert=df_Zscore_BeforeConvert%>%
+              left_join(BeforeConvertVisit_n,by="ID")%>%
+              filter(VisitNum>1)
+
+df_LinearCoeff_BefoerConvert=left_join(BeforeConvertVisit_n,Create_df_LinearCoeff(df_Zscore_BeforeConvert,ROInames),by="ID")
+write.xlsx(df_LinearCoeff_BefoerConvert,"LinearCoef_BeforeConvert_Fix_HarmZ_JADNI_AD.xlsx")
+
+```
+
+#Plot liner coef.
+```{r, echo=TRUE, warning=FALSE, message=FALSE}    
+df_LinearCoeff_spMCI=df_LinearCoeff_BefoerConvert%>%filter(subDiagnostic=="pMCI"|subDiagnostic=="sMCI")
+for(roi in ROInames){  
+    g_s=ggplot(df_LinearCoeff_spMCI,aes_string("subDiagnostic",paste0("slope_",roi),color="subDiagnostic"))
+    g_s=g_s+geom_violin()+geom_sina()
+    #g_s=g_s+ggtitle(paste0("_",roi))
+    g_s=g_s+theme(legend.position = "none")
+    #plot(g)
+  
+    g_i=ggplot(df_LinearCoeff_spMCI,aes_string("subDiagnostic",paste0("intercept_",roi),color="subDiagnostic"))
+    g_i=g_i+geom_violin()+geom_sina()
+    #g_i=g_i+ggtitle(paste0(Classifer,"_",roi))
+    g_i=g_i+theme(legend.position = "none")
+    #plot(g)
+    
+    plot(plot_grid(g_s,g_i, ncol = 2, rel_widths = c(.5, .5)))
+
+  }
+
+```

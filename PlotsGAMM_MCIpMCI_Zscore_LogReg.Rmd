@@ -1,7 +1,7 @@
 ---
 title: "AgeTrajectory DKatlas Raw, ComBat, ComBatGAM"
 author: "Maikusa"
-date: "2023-05-23"
+date: "2023-9-19"
 output:
   pdf_document: default
   html_document:
